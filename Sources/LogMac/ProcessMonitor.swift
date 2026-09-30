@@ -130,18 +130,21 @@ final class ProcessSampler: @unchecked Sendable {
         return name.isEmpty ? "pid \(raw.pid)" : name
     }
 
-    /// Folds helpers into their app: processes inside the app's bundle, plus its WebKit services.
+    /// Folds helpers into their app: processes inside the app's bundle, plus XPC services running for it
+    /// (WebKit content, networking, and GPU processes, the Open and Save panel, ...).
     /// Command-line tools launched from a terminal stay separate.
     private func groupKey(_ raw: Raw, apps: [pid_t: AppRecord]) -> (String, String, pid_t) {
-        if let app = apps[raw.pid] {
-            return ("app:\(raw.pid)", app.name, raw.pid)
-        }
+        // Check the owner before the process itself: helpers such as "Safari Web Content" and
+        // "Claude Helper" register as apps of their own and would otherwise get a row each.
         let responsible = logmac_responsible_pid(raw.pid)
         if responsible != raw.pid, let app = apps[responsible], let path = raw.path {
             let inBundle = app.bundlePath.map { path.hasPrefix($0 + "/") } ?? false
-            if inBundle || path.contains("/WebKit.framework/") {
+            if inBundle || path.contains("/XPCServices/") {
                 return ("app:\(responsible)", app.name, responsible)
             }
+        }
+        if let app = apps[raw.pid] {
+            return ("app:\(raw.pid)", app.name, raw.pid)
         }
         return ("pid:\(raw.pid)", displayName(raw, apps: apps), raw.pid)
     }
