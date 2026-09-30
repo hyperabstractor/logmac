@@ -4,12 +4,14 @@ A compact system stats menu bar app for Apple Silicon Macs, written in SwiftUI.
 
 <table align="center">
   <tr>
-    <td align="center"><img src="docs/screenshot.png" width="300" alt="LogMac's menu bar item and popover, showing CPU temperature, CPU, GPU, memory, disk, and network usage, and a remote Mac mini connected over Tailscale"></td>
-    <td align="center"><img src="docs/screenshot2.png" width="300" alt="The same popover while the remote Mac mini's CPU is at 95%: its card shows a red CPU bar, and the menu bar shows MINI · CPU 95%"></td>
+    <td align="center"><img src="docs/screenshot.png" width="260" alt="LogMac's menu bar item and popover, showing CPU temperature, CPU, GPU, memory, disk, and network usage, and a remote Mac mini connected over Tailscale"></td>
+    <td align="center"><img src="docs/screenshot2.png" width="260" alt="The same popover while the remote Mac mini's CPU is at 95%: its card shows a red CPU bar, and the menu bar shows MINI · CPU 95%"></td>
+    <td align="center"><img src="docs/screenshot3.png" width="260" alt="The Memory process list, with helpers grouped under their app and a right-click menu offering Quit Cursor and Force Quit Cursor"></td>
   </tr>
   <tr>
     <td align="center">All quiet</td>
     <td align="center">A remote Mac over its CPU alert level</td>
+    <td align="center">Process list: right-click to quit</td>
   </tr>
 </table>
 
