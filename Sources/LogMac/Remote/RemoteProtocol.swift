@@ -4,13 +4,21 @@ import Network
 
 /// Wire protocol: newline-delimited JSON `Message`s over TCP.
 ///
-/// server → hello   { id, challenge, publicKey }
-/// client → auth    { id, proof = HMAC(token, challenge) }
-///      or  pair    { id, publicKey, proof = HMAC(code, challenge ‖ serverKey ‖ clientKey), info }
+/// server → hello   { id, challenge, publicKey = kS, commit = SHA256(kS ‖ nS) }
+/// client → auth    { id, proof = HMAC(token, challenge) }          a paired Mac reconnecting
 /// server → welcome { info }, then stats { stats } every couple of seconds
 ///      or  error   { reason }, then closes
 ///
-/// Pairing derives the token from an X25519 key agreement, so it never crosses the network.
+/// Pairing is numeric comparison, like Bluetooth LE Secure Connections. Nobody types a code:
+/// client → pair    { id, publicKey = kC, nonce = nC, info }
+/// server → reveal  { nonce = nS }        the client checks it against `commit`
+///          both show code = SHA256(kC ‖ kS ‖ nC ‖ nS) as 6 digits, and the user checks they match
+/// each   → confirm {}                    sent only after that side's user clicks Pair
+/// server → welcome { info }              once both sides confirmed; each stores the pairing only then
+///
+/// The server commits to nS before it sees nC, so a machine in the middle can't steer the two codes to
+/// match: it gets one-in-a-million per attempt, and every attempt needs a person to click Pair.
+/// The token is HKDF over the X25519 shared secret, so it never crosses the network.
 enum RemoteProtocol {
     static let port: NWEndpoint.Port = 47474
     static let serviceType = "_logmac._tcp"
@@ -19,13 +27,16 @@ enum RemoteProtocol {
 
 struct Message: Codable {
     enum Kind: String, Codable {
-        case hello, auth, pair, welcome, stats, error
+        case hello, auth, pair, reveal, confirm, welcome, stats, error
     }
 
     var type: Kind
     var id: String?
     var challenge: Data?
     var publicKey: Data?
+    var commit: Data?
+    var nonce: Data?
+    /// Only sent by clients from before numeric comparison; used to tell them to update.
     var proof: Data?
     var info: DeviceInfo?
     var stats: RemoteStats?
@@ -35,7 +46,10 @@ struct Message: Codable {
 enum RejectReason {
     static let unauthorized = "unauthorized"
     static let notPairing = "not-pairing"
-    static let wrongCode = "wrong-code"
+    static let busy = "busy"
+    static let cancelled = "cancelled"
+    static let updateRequired = "update-required"
+    static let invalid = "invalid"
 }
 
 struct RemoteStats: Codable {
@@ -63,8 +77,11 @@ struct RemoteStats: Codable {
 }
 
 enum PairingCrypto {
-    static func randomChallenge() -> Data {
-        Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+    /// Length of X25519 public keys, nonces, challenges, and commits.
+    static let length = 32
+
+    static func randomBytes() -> Data {
+        Data((0..<length).map { _ in UInt8.random(in: .min ... .max) })
     }
 
     static func authProof(token: Data, challenge: Data) -> Data {
@@ -75,20 +92,23 @@ enum PairingCrypto {
         HMAC<SHA256>.isValidAuthenticationCode(proof, authenticating: challenge, using: SymmetricKey(data: token))
     }
 
-    static func pairingProof(code: String, challenge: Data, serverKey: Data, clientKey: Data) -> Data {
-        Data(HMAC<SHA256>.authenticationCode(for: challenge + serverKey + clientKey, using: SymmetricKey(data: Data(code.utf8))))
+    /// The server's commitment to its nonce, sent before it sees the client's.
+    static func commit(serverKey: Data, serverNonce: Data) -> Data {
+        Data(SHA256.hash(data: serverKey + serverNonce))
     }
 
-    static func isValidPairing(_ proof: Data, code: String, challenge: Data, serverKey: Data, clientKey: Data) -> Bool {
-        HMAC<SHA256>.isValidAuthenticationCode(
-            proof, authenticating: challenge + serverKey + clientKey, using: SymmetricKey(data: Data(code.utf8)))
+    /// The 6-digit code both Macs show, formatted "123 456".
+    static func code(clientKey: Data, serverKey: Data, clientNonce: Data, serverNonce: Data) -> String {
+        let digest = SHA256.hash(data: clientKey + serverKey + clientNonce + serverNonce)
+        let value = digest.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) } % 1_000_000
+        return String(format: "%03d %03d", value / 1000, value % 1000)
     }
 
-    static func token(privateKey: Curve25519.KeyAgreement.PrivateKey, peerKey: Data, challenge: Data) throws -> Data {
+    static func token(privateKey: Curve25519.KeyAgreement.PrivateKey, peerKey: Data, salt: Data) throws -> Data {
         let peer = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerKey)
         let secret = try privateKey.sharedSecretFromKeyAgreement(with: peer)
         let key = secret.hkdfDerivedSymmetricKey(
-            using: SHA256.self, salt: challenge, sharedInfo: Data("logmac-pairing".utf8), outputByteCount: 32)
+            using: SHA256.self, salt: salt, sharedInfo: Data("logmac-pairing".utf8), outputByteCount: 32)
         return key.withUnsafeBytes { Data($0) }
     }
 }

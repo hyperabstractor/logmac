@@ -32,6 +32,10 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
+            if server.isPairingOpen {
+                PairingPrompt(server: server)
+            }
+
             Card {
                 ForEach(Metric.allCases) { metric in
                     MetricRow(model: model, metric: metric, onOpen: metric.hasProcessList ? { show(metric) } : nil)

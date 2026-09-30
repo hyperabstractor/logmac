@@ -163,81 +163,131 @@ private struct RemoteHostRow: View {
     }
 }
 
-/// Pick a Mac found on the LAN or type a Tailscale name / IP, then enter its pairing code.
+/// Pick a Mac found on the LAN or type a Tailscale name / IP, then compare codes with it.
 private struct AddMacView: View {
     let monitor: RemoteMonitor
     var onDone: () -> Void
 
     @State private var selectedID: String?
     @State private var address = ""
-    @State private var code = ""
     @State private var error: String?
-    @State private var isPairing = false
+    @State private var attempt: PairingAttempt?
 
     var body: some View {
         Card {
-            Text("On the other Mac, open LogMac settings, turn on sharing, and choose Pair new Mac.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if monitor.discovered.isEmpty {
-                Text("No Macs found on this network.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(monitor.discovered) { item in
-                Button {
-                    selectedID = item.id
-                    address = ""
-                } label: {
-                    HStack {
-                        Image(systemName: selectedID == item.id ? "largecircle.fill.circle" : "circle")
-                            .foregroundStyle(selectedID == item.id ? Color.accentColor : .secondary)
-                        Text(item.displayName)
-                        Spacer()
-                        Text("LAN").font(.system(size: 10)).foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            TextField("Tailscale name or IP", text: $address)
-                .textFieldStyle(.roundedBorder)
-                .onChange(of: address) { _, value in
-                    if !value.isEmpty { selectedID = nil }
-                    error = nil
-                }
-            TextField("6-digit code", text: $code)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12).monospacedDigit())
-                .onChange(of: code) { _, _ in error = nil }
-                .onSubmit(pair)
-
-            if let error {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack {
-                Spacer()
-                if isPairing { ProgressView().controlSize(.small) }
-                Button("Pair", action: pair)
-                    .keyboardShortcut(.defaultAction)
+            if let attempt, !isEnded(attempt.state) {
+                progress(attempt)
+            } else {
+                form
             }
         }
         .font(.system(size: 12))
+        .onChange(of: attempt?.state) { _, state in
+            switch state {
+            case .paired?:
+                onDone()
+            case let .failed(failure)?:
+                error = failure.message
+            default:
+                break
+            }
+        }
+        .onDisappear { attempt?.cancel() }
+    }
+
+    @ViewBuilder
+    private var form: some View {
+        Text("On the other Mac, open LogMac settings, turn on sharing, and choose Pair new Mac.")
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        if monitor.discovered.isEmpty {
+            Text("No Macs found on this network.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        ForEach(monitor.discovered) { item in
+            Button {
+                selectedID = item.id
+                address = ""
+                error = nil
+            } label: {
+                HStack {
+                    Image(systemName: selectedID == item.id ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(selectedID == item.id ? Color.accentColor : .secondary)
+                    Text(item.displayName)
+                    Spacer()
+                    Text("LAN").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+
+        TextField("Tailscale name or IP", text: $address)
+            .textFieldStyle(.roundedBorder)
+            .onChange(of: address) { _, value in
+                if !value.isEmpty { selectedID = nil }
+                error = nil
+            }
+            .onSubmit(pair)
+
+        if let error {
+            Text(error)
+                .font(.system(size: 11))
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        HStack {
+            Spacer()
+            Button("Pair", action: pair)
+                .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    @ViewBuilder
+    private func progress(_ attempt: PairingAttempt) -> some View {
+        switch attempt.state {
+        case .connecting:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Connecting to \(attempt.targetName)…")
+                Spacer()
+                Button("Cancel") { attempt.cancel() }.buttonStyle(.borderless)
+            }
+        case let .confirm(code):
+            PairingCodeView(
+                title: "Pairing with \(attempt.targetName)",
+                code: code,
+                isWaiting: false,
+                onConfirm: attempt.confirm,
+                onCancel: attempt.cancel
+            )
+        case let .waiting(code):
+            PairingCodeView(
+                title: "Pairing with \(attempt.targetName)",
+                code: code,
+                isWaiting: true,
+                onConfirm: {},
+                onCancel: attempt.cancel
+            )
+        case .paired, .cancelled, .failed:
+            EmptyView()
+        }
+    }
+
+    private func isEnded(_ state: PairingAttempt.State) -> Bool {
+        switch state {
+        case .paired, .cancelled, .failed: true
+        default: false
+        }
     }
 
     private func pair() {
-        guard !isPairing else { return }
-        let trimmedCode = code.filter(\.isNumber)
         let trimmedAddress = address.trimmingCharacters(in: .whitespaces)
-
-        let target: RemoteMonitor.PairTarget
+        let target: PairingAttempt.Target
         if let selectedID, let item = monitor.discovered.first(where: { $0.id == selectedID }) {
             target = .discovered(item)
         } else if !trimmedAddress.isEmpty {
@@ -246,17 +296,69 @@ private struct AddMacView: View {
             error = "Choose a Mac above, or enter its Tailscale name or IP."
             return
         }
-        guard trimmedCode.count == 6 else {
-            error = "Enter the 6-digit code shown on the other Mac."
-            return
-        }
+        error = nil
+        attempt = monitor.beginPairing(with: target)
+    }
+}
 
-        isPairing = true
-        monitor.pair(with: target, code: trimmedCode) { result in
-            isPairing = false
-            switch result {
-            case .success: onDone()
-            case let .failure(failure): error = failure.message
+/// The 6-digit code both Macs show during pairing, with Pair / Cancel.
+struct PairingCodeView: View {
+    let title: String
+    let code: String
+    let isWaiting: Bool
+    var onConfirm: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+            Text(code)
+                .font(.system(size: 26, weight: .semibold, design: .monospaced))
+                .frame(maxWidth: .infinity)
+            Text("Check that the other Mac shows the same code.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Cancel", action: onCancel)
+                Spacer()
+                if isWaiting {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for the other Mac…").font(.system(size: 11)).foregroundStyle(.secondary)
+                } else {
+                    Button("Codes match: Pair", action: onConfirm)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .font(.system(size: 12))
+    }
+}
+
+/// Shown at the top of the popover while this Mac accepts pairing requests.
+struct PairingPrompt: View {
+    let server: SharingServer
+
+    var body: some View {
+        Card {
+            if let pending = server.pending {
+                PairingCodeView(
+                    title: "\(pending.peerName) wants to watch this Mac",
+                    code: pending.code,
+                    isWaiting: pending.confirmedHere,
+                    onConfirm: server.confirmPairing,
+                    onCancel: server.cancelPendingPairing
+                )
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for the other Mac…").font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Button("Stop") { server.closePairing() }.buttonStyle(.borderless)
+                }
+                Text("On the other Mac, choose Add Mac and pick this one. Pairing stays open for 5 minutes.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -283,20 +385,12 @@ struct SharingSettings: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if let code = server.pairingCode {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(code.prefix(3) + " " + code.suffix(3))
-                            .font(.system(size: 22, weight: .semibold, design: .monospaced))
-                            .textSelection(.enabled)
-                        Spacer()
-                        Button("Cancel") { server.cancelPairing() }
-                            .buttonStyle(.borderless)
-                    }
-                    Text("Enter this code on the other Mac. It expires in 5 minutes.")
+                if server.isPairingOpen {
+                    Text("Pairing is open. The code appears at the top of this panel.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 } else {
-                    Button("Pair new Mac") { server.beginPairing() }
+                    Button("Pair new Mac") { server.openPairing() }
                 }
 
                 ForEach(server.viewers) { viewer in

@@ -45,21 +45,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.delegate = self
 
+        // A Mac asking to pair needs the code on screen to be compared.
+        server.onPairingRequest = { [weak self] in self?.showPopover() }
+
         model.start()
         server.activate()
         monitor.start()
     }
 
     @objc private func togglePopover(_ sender: Any?) {
-        guard let button = statusItem.button else { return }
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            NSApp.activate()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-            button.highlight(true)
+            showPopover()
         }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button, !popover.isShown else { return }
+        NSApp.activate()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        button.highlight(true)
     }
 
     func popoverDidClose(_ notification: Notification) {
