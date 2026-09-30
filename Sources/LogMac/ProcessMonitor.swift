@@ -6,8 +6,8 @@ import SensorsC
 struct ProcessEntry: Identifiable, Equatable {
     let id: String
     let name: String
-    /// Process whose icon represents this row (the app, for grouped helpers).
-    let iconPID: pid_t
+    /// The process this row stands for: its icon, and what Quit acts on (the app, for grouped helpers).
+    let pid: pid_t
     let path: String?
     /// Percent of one core, like Activity Monitor, so it can exceed 100.
     var cpu: Double
@@ -64,7 +64,7 @@ final class ProcessSampler: @unchecked Sendable {
                 0
             }
 
-            let (key, name, iconPID) = grouped ? groupKey(raw, apps: apps) : ("pid:\(raw.pid)", displayName(raw, apps: apps), raw.pid)
+            let (key, name, pid) = grouped ? groupKey(raw, apps: apps) : ("pid:\(raw.pid)", displayName(raw, apps: apps), raw.pid)
             if var existing = entries[key] {
                 existing.cpu += cpu
                 existing.memory += raw.footprint
@@ -72,7 +72,7 @@ final class ProcessSampler: @unchecked Sendable {
                 entries[key] = existing
             } else {
                 entries[key] = ProcessEntry(
-                    id: key, name: name, iconPID: iconPID, path: raw.path,
+                    id: key, name: name, pid: pid, path: raw.path,
                     cpu: cpu, memory: raw.footprint, count: 1)
             }
         }
@@ -204,6 +204,11 @@ final class ProcessMonitor {
         timer?.invalidate()
         timer = nil
         metric = nil
+    }
+
+    /// Re-samples shortly, e.g. so a quit process drops off the list without waiting for the timer.
+    func refreshSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refresh() }
     }
 
     private func refresh() {

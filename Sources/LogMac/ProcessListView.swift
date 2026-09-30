@@ -49,11 +49,26 @@ struct ProcessListView: View {
                 } else {
                     ForEach(processes.top) { entry in
                         ProcessRow(entry: entry, metric: metric)
+                            .contextMenu {
+                                // `entry` is captured when the menu opens, so re-sorting can't retarget it.
+                                if ProcessActions.isProtected(entry) {
+                                    Text("\(entry.name) can't be quit from here")
+                                } else {
+                                    Button("Quit \(entry.name)") {
+                                        ProcessActions.quit(entry)
+                                        processes.refreshSoon()
+                                    }
+                                    Button("Force Quit \(entry.name)", role: .destructive) {
+                                        ProcessActions.forceQuit(entry)
+                                        processes.refreshSoon()
+                                    }
+                                }
+                            }
                     }
                 }
             }
 
-            Text("Shows processes running as you. System processes need admin access.")
+            Text("Right-click a process to quit it. Shows processes running as you; system processes need admin access.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -112,18 +127,49 @@ private struct ProcessRow: View {
     }
 }
 
+/// Quit and Force Quit for a process row. Apps get a normal quit request (so they can prompt to save);
+/// other processes get SIGTERM / SIGKILL. Only the user's own processes are listed, so no privileges are needed.
+@MainActor
+private enum ProcessActions {
+    /// Killing these ends the login session.
+    private static let protectedNames: Set<String> = ["loginwindow", "launchd"]
+
+    static func isProtected(_ entry: ProcessEntry) -> Bool {
+        let executable = entry.path.map { ($0 as NSString).lastPathComponent }
+        return protectedNames.contains(entry.name) || executable.map(protectedNames.contains) == true
+    }
+
+    static func quit(_ entry: ProcessEntry) {
+        guard !isProtected(entry) else { return }
+        if let app = NSRunningApplication(processIdentifier: entry.pid) {
+            app.terminate()
+        } else {
+            kill(entry.pid, SIGTERM)
+        }
+    }
+
+    static func forceQuit(_ entry: ProcessEntry) {
+        guard !isProtected(entry) else { return }
+        if let app = NSRunningApplication(processIdentifier: entry.pid) {
+            app.forceTerminate()
+        } else {
+            kill(entry.pid, SIGKILL)
+        }
+    }
+}
+
 /// App icons for GUI processes, the generic executable icon otherwise. Cached by pid.
 @MainActor
 private enum ProcessIcons {
     private static var cache: [pid_t: NSImage] = [:]
 
     static func icon(for entry: ProcessEntry) -> NSImage {
-        if let cached = cache[entry.iconPID] { return cached }
-        let icon = NSRunningApplication(processIdentifier: entry.iconPID)?.icon
+        if let cached = cache[entry.pid] { return cached }
+        let icon = NSRunningApplication(processIdentifier: entry.pid)?.icon
             ?? entry.path.map { NSWorkspace.shared.icon(forFile: $0) }
             ?? NSWorkspace.shared.icon(for: .unixExecutable)
         if cache.count > 500 { cache.removeAll() }
-        cache[entry.iconPID] = icon
+        cache[entry.pid] = icon
         return icon
     }
 }
