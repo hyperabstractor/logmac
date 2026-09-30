@@ -9,6 +9,9 @@ private final class PassthroughHostingView<Content: View>: NSHostingView<Content
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let model = StatsModel()
+    private let store = PairingStore()
+    private lazy var monitor = RemoteMonitor(store: store)
+    private lazy var server = SharingServer(store: store) { [model] in model.snapshot }
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
 
@@ -16,7 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: 60)
         guard let button = statusItem.button else { return }
 
-        let content = StatusItemView(model: model) { [weak self] width in
+        monitor.threshold = { [model] in model.threshold(for: $0) }
+
+        let content = StatusItemView(model: model, monitor: monitor) { [weak self] width in
             self?.statusItem.length = ceil(width)
         }
         let host = PassthroughHostingView(rootView: content)
@@ -34,13 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         button.action = #selector(togglePopover(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
-        let controller = NSHostingController(rootView: PopoverView(model: model))
+        let controller = NSHostingController(rootView: PopoverView(model: model, monitor: monitor, server: server))
         controller.sizingOptions = .preferredContentSize
         popover.contentViewController = controller
         popover.behavior = .transient
         popover.delegate = self
 
         model.start()
+        server.activate()
+        monitor.start()
     }
 
     @objc private func togglePopover(_ sender: Any?) {

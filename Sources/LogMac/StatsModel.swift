@@ -17,6 +17,12 @@ enum DisplayMode: String, CaseIterable, Identifiable {
 enum Level {
     case normal, warm, alert
 
+    /// Metrics within this many points of their threshold show as "warm".
+    static let warmBand: Double = 15
+    /// CPU temperature bands, in °C.
+    static let tempWarm: Double = 80
+    static let tempHot: Double = 95
+
     var dotColor: Color {
         switch self {
         case .normal: .green
@@ -32,23 +38,72 @@ enum Level {
         case .alert: .red
         }
     }
+
+    static func of(value: Double?, threshold: Double, alerting: Bool) -> Level {
+        if alerting { return .alert }
+        guard let value else { return .normal }
+        return value >= threshold - warmBand ? .warm : .normal
+    }
+
+    static func ofTemperature(_ celsius: Double?) -> Level {
+        guard let celsius else { return .normal }
+        if celsius >= tempHot { return .alert }
+        if celsius >= tempWarm { return .warm }
+        return .normal
+    }
 }
 
-@MainActor
-@Observable
-final class StatsModel {
+/// Debounced threshold alerts: a metric must stay over its threshold before alerting,
+/// and clearly below it before the alert clears, so the menu bar doesn't flicker.
+struct AlertTracker {
     /// A metric must stay above its threshold this long before the menu bar expands.
     static let engageDelay: TimeInterval = 3
     /// And below (threshold - hysteresis) this long before it collapses again.
     static let releaseDelay: TimeInterval = 8
     static let hysteresis: Double = 5
-    /// Metrics within this many points of their threshold show as "warm".
-    static let warmBand: Double = 15
-    static let tempWarm: Double = 80
-    static let tempHot: Double = 95
 
-    private(set) var snapshot = Snapshot()
     private(set) var alerting: Set<Metric> = []
+    private var aboveSince: [Metric: Date] = [:]
+    private var belowSince: [Metric: Date] = [:]
+
+    mutating func update(values: [Metric: Double], threshold: (Metric) -> Double, now: Date) {
+        for metric in Metric.allCases {
+            guard let value = values[metric] else { continue }
+            let limit = threshold(metric)
+
+            if alerting.contains(metric) {
+                if value < limit - Self.hysteresis {
+                    let since = belowSince[metric] ?? now
+                    belowSince[metric] = since
+                    if now.timeIntervalSince(since) >= Self.releaseDelay {
+                        alerting.remove(metric)
+                        belowSince[metric] = nil
+                    }
+                } else {
+                    belowSince[metric] = nil
+                }
+            } else if value >= limit {
+                let since = aboveSince[metric] ?? now
+                aboveSince[metric] = since
+                // Disk usage moves slowly, so there's no point debouncing it.
+                let delay = metric == .ssd ? 0 : Self.engageDelay
+                if now.timeIntervalSince(since) >= delay {
+                    alerting.insert(metric)
+                    aboveSince[metric] = nil
+                }
+            } else {
+                aboveSince[metric] = nil
+            }
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class StatsModel {
+    private(set) var snapshot = Snapshot()
+    private(set) var alerts = AlertTracker()
+    var alerting: Set<Metric> { alerts.alerting }
 
     var displayMode: DisplayMode {
         didSet { defaults.set(displayMode.rawValue, forKey: "displayMode") }
@@ -64,8 +119,6 @@ final class StatsModel {
     @ObservationIgnored private let sampler = SystemSampler()
     @ObservationIgnored private let queue = DispatchQueue(label: "logmac.sampler", qos: .utility)
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var aboveSince: [Metric: Date] = [:]
-    @ObservationIgnored private var belowSince: [Metric: Date] = [:]
 
     init() {
         displayMode = DisplayMode(rawValue: defaults.string(forKey: "displayMode") ?? "") ?? .auto
@@ -104,9 +157,7 @@ final class StatsModel {
     }
 
     func level(_ metric: Metric) -> Level {
-        if alerting.contains(metric) { return .alert }
-        guard let value = value(metric) else { return .normal }
-        return value >= threshold(for: metric) - Self.warmBand ? .warm : .normal
+        Level.of(value: value(metric), threshold: threshold(for: metric), alerting: alerting.contains(metric))
     }
 
     /// The alerting metric furthest over its threshold, shown as the menu bar label.
@@ -115,10 +166,7 @@ final class StatsModel {
     }
 
     var tempLevel: Level {
-        guard let temp = snapshot.cpuTemp else { return .normal }
-        if temp >= Self.tempHot { return .alert }
-        if temp >= Self.tempWarm { return .warm }
-        return .normal
+        Level.ofTemperature(snapshot.cpuTemp)
     }
 
     func formatTemp(_ celsius: Double?) -> String {
@@ -146,35 +194,6 @@ final class StatsModel {
     }
 
     private func updateAlerts(now: Date) {
-        var next = alerting
-        for metric in Metric.allCases {
-            guard let value = value(metric) else { continue }
-            let limit = threshold(for: metric)
-
-            if next.contains(metric) {
-                if value < limit - Self.hysteresis {
-                    let since = belowSince[metric] ?? now
-                    belowSince[metric] = since
-                    if now.timeIntervalSince(since) >= Self.releaseDelay {
-                        next.remove(metric)
-                        belowSince[metric] = nil
-                    }
-                } else {
-                    belowSince[metric] = nil
-                }
-            } else if value >= limit {
-                let since = aboveSince[metric] ?? now
-                aboveSince[metric] = since
-                // Disk usage moves slowly, so there's no point debouncing it.
-                let delay = metric == .ssd ? 0 : Self.engageDelay
-                if now.timeIntervalSince(since) >= delay {
-                    next.insert(metric)
-                    aboveSince[metric] = nil
-                }
-            } else {
-                aboveSince[metric] = nil
-            }
-        }
-        if next != alerting { alerting = next }
+        alerts.update(values: snapshot.values, threshold: threshold(for:), now: now)
     }
 }

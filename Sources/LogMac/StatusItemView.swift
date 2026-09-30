@@ -1,8 +1,10 @@
 import SwiftUI
 
 /// The menu bar content: temperature, then dots (idle) or bars plus the alerting metric.
+/// Remote Macs only add a label; the dots and bars always describe this Mac.
 struct StatusItemView: View {
     let model: StatsModel
+    let monitor: RemoteMonitor
     var onWidthChange: (CGFloat) -> Void
 
     private var showsBars: Bool {
@@ -21,11 +23,16 @@ struct StatusItemView: View {
 
             if showsBars {
                 MiniBars(model: model)
-                if model.displayMode != .dots, let metric = model.primaryAlert {
-                    AlertLabel(metric: metric, value: model.value(metric) ?? 0)
-                }
             } else {
                 Dots(model: model)
+            }
+
+            if model.displayMode != .dots {
+                if let metric = model.primaryAlert {
+                    AlertLabel(title: metric.label, value: model.value(metric) ?? 0)
+                } else if let remote = monitor.primaryAlert {
+                    AlertLabel(title: "\(remote.host.info.shortName) · \(remote.metric.label)", value: remote.value)
+                }
             }
         }
         .padding(.horizontal, 6)
@@ -84,12 +91,12 @@ private struct MiniBars: View {
 }
 
 private struct AlertLabel: View {
-    let metric: Metric
+    let title: String
     let value: Double
 
     var body: some View {
         VStack(alignment: .leading, spacing: -1) {
-            Text(metric.label)
+            Text(title)
                 .font(.system(size: 7, weight: .semibold))
             Text("\(Int(value.rounded()))%")
                 .font(.system(size: 11, weight: .semibold).monospacedDigit())

@@ -3,6 +3,8 @@ import SwiftUI
 
 struct PopoverView: View {
     @Bindable var model: StatsModel
+    let monitor: RemoteMonitor
+    let server: SharingServer
     @State private var showsSettings = false
 
     var body: some View {
@@ -26,8 +28,11 @@ struct PopoverView: View {
                 .font(.system(size: 12))
             }
 
+            RemoteSection(model: model, monitor: monitor)
+
             if showsSettings {
                 SettingsSection(model: model)
+                SharingSettings(server: server)
             }
 
             HStack {
@@ -67,7 +72,7 @@ struct PopoverView: View {
     }
 }
 
-private struct Card<Content: View>: View {
+struct Card<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -122,7 +127,7 @@ private struct MetricRow: View {
 }
 
 /// A progress bar with a tick marking the alert threshold.
-private struct ThresholdBar: View {
+struct ThresholdBar: View {
     let fraction: Double
     let threshold: Double
     let color: Color
@@ -208,7 +213,7 @@ private struct SettingsSection: View {
     }
 }
 
-private func bytes(_ count: Int64, _ style: ByteCountFormatter.CountStyle) -> String {
+func bytes(_ count: Int64, _ style: ByteCountFormatter.CountStyle) -> String {
     let formatter = ByteCountFormatter()
     formatter.countStyle = style
     formatter.allowsNonnumericFormatting = false
