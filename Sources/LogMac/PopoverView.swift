@@ -206,11 +206,26 @@ private struct NetRate: View {
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: symbol).foregroundStyle(color)
-            Text("\(bytes(Int64(bytesPerSecond), .file))/s")
+            Text(rate(bytesPerSecond))
                 .monospacedDigit()
+                .lineLimit(1)
                 .frame(minWidth: 62, alignment: .trailing)
         }
     }
+}
+
+/// "871 B/s", "5 KB/s", "1.2 MB/s": short units so the rate never wraps and resizes the row.
+func rate(_ bytesPerSecond: Double) -> String {
+    let units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    var value = max(bytesPerSecond, 0)
+    var index = 0
+    // Step up before 1000 rounds to "1000", so values stay at three digits or fewer.
+    while value >= 999.5, index < units.count - 1 {
+        value /= 1000
+        index += 1
+    }
+    let digits = index > 0 && value < 9.95 ? 1 : 0
+    return String(format: "%.\(digits)f \(units[index])", value)
 }
 
 private struct SettingsSection: View {
