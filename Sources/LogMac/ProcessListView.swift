@@ -86,7 +86,7 @@ struct ProcessListView: View {
             let cores = ProcessInfo.processInfo.activeProcessorCount
             return "\(Int((s.values[.cpu] ?? 0).rounded()))% overall · \(cores) cores"
         default:
-            return "\(bytes(Int64(s.memUsed), .memory)) of \(bytes(Int64(s.memTotal), .memory)) used"
+            return "\(usage(Int64(s.memUsed), of: Int64(s.memTotal), .memory)) used"
         }
     }
 }

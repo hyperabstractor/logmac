@@ -127,7 +127,10 @@ private struct MetricRow: View {
                 Text(metric.title)
                 Spacer()
                 if let detail {
-                    Text(detail).foregroundStyle(.secondary)
+                    Text(detail)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 Text(value.map { "\(Int($0.rounded()))%" } ?? "--")
                     .fontWeight(.semibold)
@@ -162,9 +165,9 @@ private struct MetricRow: View {
         let s = model.snapshot
         switch metric {
         case .ram where s.memTotal > 0:
-            return "\(bytes(Int64(s.memUsed), .memory)) of \(bytes(Int64(s.memTotal), .memory))"
+            return usage(Int64(s.memUsed), of: Int64(s.memTotal), .memory)
         case .ssd where s.diskTotal > 0:
-            return "\(bytes(s.diskUsed, .file)) of \(bytes(s.diskTotal, .file))"
+            return usage(s.diskUsed, of: s.diskTotal, .file)
         default:
             return nil
         }
@@ -263,4 +266,23 @@ func bytes(_ count: Int64, _ style: ByteCountFormatter.CountStyle) -> String {
     formatter.countStyle = style
     formatter.allowsNonnumericFormatting = false
     return formatter.string(fromByteCount: count)
+}
+
+/// "10.3 of 16 GB" or "200 of 494 GB": both values in the total's unit, so the text stays short.
+func usage(_ used: Int64, of total: Int64, _ style: ByteCountFormatter.CountStyle) -> String {
+    let base: Double = style == .memory ? 1024 : 1000
+    let units = ["bytes", "KB", "MB", "GB", "TB", "PB"]
+    var exponent = 0
+    var scaledTotal = Double(total)
+    while scaledTotal >= base, exponent < units.count - 1 {
+        scaledTotal /= base
+        exponent += 1
+    }
+    let scaledUsed = Double(used) / pow(base, Double(exponent))
+    // One decimal for small totals (16 GB), none for large ones (494 GB).
+    let formatter = NumberFormatter()
+    formatter.minimumFractionDigits = 0
+    formatter.maximumFractionDigits = scaledTotal < 100 ? 1 : 0
+    func format(_ value: Double) -> String { formatter.string(from: NSNumber(value: value)) ?? "\(value)" }
+    return "\(format(scaledUsed)) of \(format(scaledTotal)) \(units[exponent])"
 }
