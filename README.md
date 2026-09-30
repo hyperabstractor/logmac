@@ -19,7 +19,20 @@ A compact system stats menu bar app for Apple Silicon Macs, written in SwiftUI.
 ## Requirements
 
 - macOS 14 or later, Apple Silicon (temperatures come from Apple Silicon sensors)
-- Swift 6 toolchain. Xcode isn't required; the Command Line Tools are enough.
+- To build from source: a Swift 6 toolchain. Xcode isn't required; the Command Line Tools are enough.
+
+## Install
+
+1. Download `LogMac-<version>.zip` from the [latest release](https://github.com/hyperabstractor/logmac/releases/latest).
+2. Unzip it and move `LogMac.app` to `/Applications`.
+3. Open it. LogMac isn't notarized (that needs a paid Apple Developer account), so macOS says it can't verify the
+   app. Go to **System Settings → Privacy & Security** and click **Open Anyway**, or clear the quarantine flag:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/LogMac.app
+   ```
+
+Each release lists the zip's SHA-256; check it with `shasum -a 256 LogMac-<version>.zip`.
 
 ## Build and run
 
@@ -28,11 +41,10 @@ A compact system stats menu bar app for Apple Silicon Macs, written in SwiftUI.
 ```
 
 This builds `build/LogMac.app` (release, ad-hoc signed). To move it to another Mac, copy the app over; if it arrived
-by AirDrop or download, clear the quarantine flag once:
+by AirDrop or download, clear the quarantine flag as in [Install](#install).
 
-```bash
-xattr -dr com.apple.quarantine /Applications/LogMac.app
-```
+`./scripts/release.sh` builds `build/LogMac-<version>.zip` for a GitHub release and prints its SHA-256. The version
+comes from `Resources/Info.plist`.
 
 `LogMac --dump` prints every temperature sensor and one stats sample, which helps when a chip reports odd values.
 

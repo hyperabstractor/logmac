@@ -2,27 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>LogMac</string>
-    <key>CFBundleIdentifier</key>
-    <string>app.logmac.LogMac</string>
-    <key>CFBundleName</key>
-    <string>LogMac</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
-    <key>CFBundleVersion</key>
-    <string>2</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>LogMac finds your other Macs on this network so you can watch their stats.</string>
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_logmac._tcp</string>
-    </array>
+	<key>CFBundleExecutable</key>
+	<string>LogMac</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.logmac.LogMac</string>
+	<key>CFBundleName</key>
+	<string>LogMac</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.3.0</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_logmac._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>LogMac finds your other Macs on this network so you can watch their stats.</string>
 </dict>
 </plist>
