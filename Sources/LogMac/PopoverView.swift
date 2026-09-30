@@ -6,14 +6,35 @@ struct PopoverView: View {
     let monitor: RemoteMonitor
     let server: SharingServer
     @State private var showsSettings = false
+    @State private var detail: Metric?
+    @State private var processes = ProcessMonitor()
+    @State private var mainHeight: CGFloat = 0
 
     var body: some View {
+        ZStack(alignment: .top) {
+            if let detail {
+                ProcessListView(model: model, processes: processes, metric: detail) { show(nil) }
+                    .frame(minHeight: mainHeight, alignment: .top)
+                    .transition(.move(edge: .trailing))
+            } else {
+                main
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { mainHeight = $0 }
+                    .transition(.move(edge: .leading))
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
+        .clipped()
+        .onDisappear { show(nil) }
+    }
+
+    private var main: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
             Card {
                 ForEach(Metric.allCases) { metric in
-                    MetricRow(model: model, metric: metric)
+                    MetricRow(model: model, metric: metric, onOpen: metric.hasProcessList ? { show(metric) } : nil)
                     if metric != Metric.allCases.last { Divider() }
                 }
             }
@@ -45,8 +66,11 @@ struct PopoverView: View {
             .buttonStyle(.borderless)
             .font(.system(size: 12))
         }
-        .padding(14)
-        .frame(width: 300)
+    }
+
+    private func show(_ metric: Metric?) {
+        if let metric { processes.start(metric) } else { processes.stop() }
+        withAnimation(.snappy(duration: 0.3)) { detail = metric }
     }
 
     private var header: some View {
@@ -85,6 +109,9 @@ struct Card<Content: View>: View {
 private struct MetricRow: View {
     let model: StatsModel
     let metric: Metric
+    /// Opens this metric's process list; nil for metrics without one.
+    var onOpen: (() -> Void)?
+    @State private var isHovered = false
 
     var body: some View {
         let value = model.value(metric)
@@ -102,6 +129,11 @@ private struct MetricRow: View {
                     .fontWeight(.semibold)
                     .monospacedDigit()
                     .frame(minWidth: 36, alignment: .trailing)
+                // Hidden rather than omitted so every row's value stays aligned.
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .opacity(onOpen == nil ? 0 : 1)
             }
             .font(.system(size: 12))
 
@@ -111,6 +143,15 @@ private struct MetricRow: View {
                 color: model.level(metric).barColor
             )
         }
+        .padding(4)
+        .background(
+            Color.primary.opacity(isHovered && onOpen != nil ? 0.06 : 0),
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .padding(-4)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .onTapGesture { onOpen?() }
     }
 
     private var detail: String? {

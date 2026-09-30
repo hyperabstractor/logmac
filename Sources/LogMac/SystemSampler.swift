@@ -45,6 +45,11 @@ enum Metric: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Whether clicking the metric opens a per-process breakdown.
+    var hasProcessList: Bool {
+        self == .cpu || self == .ram
+    }
+
     var defaultThreshold: Double {
         switch self {
         case .cpu, .gpu, .ram: 85
