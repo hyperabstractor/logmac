@@ -2,9 +2,16 @@
 
 A compact system stats menu bar app for Apple Silicon Macs, written in SwiftUI.
 
-<p align="center">
-  <img src="docs/screenshot.png" width="320" alt="LogMac's menu bar item and popover, showing CPU temperature, CPU, GPU, memory, disk, and network usage, and a remote Mac mini connected over Tailscale">
-</p>
+<table align="center">
+  <tr>
+    <td align="center"><img src="docs/screenshot.png" width="300" alt="LogMac's menu bar item and popover, showing CPU temperature, CPU, GPU, memory, disk, and network usage, and a remote Mac mini connected over Tailscale"></td>
+    <td align="center"><img src="docs/screenshot2.png" width="300" alt="The same popover while the remote Mac mini's CPU is at 95%: its card shows a red CPU bar, and the menu bar shows MINI · CPU 95%"></td>
+  </tr>
+  <tr>
+    <td align="center">All quiet</td>
+    <td align="center">A remote Mac over its CPU alert level</td>
+  </tr>
+</table>
 
 - **Menu bar:** CPU temperature, always shown, plus four status dots for CPU, GPU, RAM, and SSD. When a metric
   stays over its alert level, the dots expand into mini bars with a label such as `RAM 91%`, then collapse again
