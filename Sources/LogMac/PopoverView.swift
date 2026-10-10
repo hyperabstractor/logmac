@@ -6,14 +6,21 @@ struct PopoverView: View {
     let monitor: RemoteMonitor
     let server: SharingServer
     @State private var showsSettings = false
-    @State private var detail: Metric?
+    @State private var detail: Detail?
     @State private var processes = ProcessMonitor()
+    @State private var remoteProcesses: RemoteProcessSource?
     @State private var mainHeight: CGFloat = 0
+
+    /// Which process list is open.
+    private enum Detail: Equatable {
+        case local(Metric)
+        case remote(host: String, Metric)
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
             if let detail {
-                ProcessListView(model: model, processes: processes, metric: detail) { show(nil) }
+                processList(detail)
                     .frame(minHeight: mainHeight, alignment: .top)
                     .transition(.move(edge: .trailing))
             } else {
@@ -38,7 +45,7 @@ struct PopoverView: View {
 
             Card {
                 ForEach(Metric.allCases) { metric in
-                    MetricRow(model: model, metric: metric, onOpen: metric.hasProcessList ? { show(metric) } : nil)
+                    MetricRow(model: model, metric: metric, onOpen: metric.hasProcessList ? { show(.local(metric)) } : nil)
                     if metric != Metric.allCases.last { Divider() }
                 }
             }
@@ -53,7 +60,9 @@ struct PopoverView: View {
                 .font(.system(size: 12))
             }
 
-            RemoteSection(model: model, monitor: monitor)
+            RemoteSection(model: model, monitor: monitor) { host, metric in
+                show(.remote(host: host.id, metric))
+            }
 
             if showsSettings {
                 SettingsSection(model: model)
@@ -72,9 +81,66 @@ struct PopoverView: View {
         }
     }
 
-    private func show(_ metric: Metric?) {
-        if let metric { processes.start(metric) } else { processes.stop() }
-        withAnimation(.snappy(duration: 0.3)) { detail = metric }
+    @ViewBuilder
+    private func processList(_ detail: Detail) -> some View {
+        switch detail {
+        case let .local(metric):
+            ProcessListView(
+                source: processes,
+                metric: metric,
+                summary: localSummary(metric),
+                footnote: "Right-click a process to quit it. Shows processes running as you; system processes need admin access."
+            ) { show(nil) }
+        case let .remote(hostID, metric):
+            if let source = remoteProcesses {
+                let host = monitor.hosts.first { $0.id == hostID }
+                ProcessListView(
+                    source: source,
+                    metric: metric,
+                    summary: remoteSummary(host, metric),
+                    footnote: "Right-click a process to quit it on \(host?.info.displayName ?? "that Mac"). "
+                        + "Shows processes running as the user signed in there."
+                ) { show(nil) }
+            }
+        }
+    }
+
+    private func localSummary(_ metric: Metric) -> String {
+        let s = model.snapshot
+        switch metric {
+        case .cpu:
+            return "\(Int((s.values[.cpu] ?? 0).rounded()))% overall · \(ProcessInfo.processInfo.activeProcessorCount) cores"
+        default:
+            return "\(usage(Int64(s.memUsed), of: Int64(s.memTotal), .memory)) used"
+        }
+    }
+
+    private func remoteSummary(_ host: RemoteHost?, _ metric: Metric) -> String {
+        guard let host else { return "" }
+        guard let stats = host.stats, host.isConnected else { return host.info.displayName }
+        let detail = switch metric {
+        case .cpu: "\(Int((stats.value(.cpu) ?? 0).rounded()))% overall"
+        default: "\(usage(Int64(stats.memUsed), of: Int64(stats.memTotal), .memory)) used"
+        }
+        return "\(host.info.displayName) · \(detail)"
+    }
+
+    private func show(_ next: Detail?) {
+        processes.stop()
+        remoteProcesses?.stop()
+        remoteProcesses = nil
+        switch next {
+        case let .local(metric)?:
+            processes.start(metric)
+        case let .remote(hostID, metric)?:
+            guard let host = monitor.hosts.first(where: { $0.id == hostID }) else { return }
+            let source = RemoteProcessSource(host: host, metric: metric)
+            source.start()
+            remoteProcesses = source
+        case nil:
+            break
+        }
+        withAnimation(.snappy(duration: 0.3)) { detail = next }
     }
 
     private var header: some View {

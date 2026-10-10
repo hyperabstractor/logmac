@@ -151,6 +151,111 @@ func runSelfTest() -> Never {
         relayServer.isEnabled = false
     }
 
+    // 6. Remote process lists and signed quit requests.
+    do {
+        let clientStore = store("proc-client")
+        let serverStore = store("proc-server")
+        let token = PairingCrypto.randomBytes()
+        let viewerID = clientStore.data.deviceID
+        serverStore.update {
+            $0.viewers.append(PairedViewer(id: viewerID, name: "Test viewer", token: token, pairedAt: Date()))
+        }
+        let server = makeServer(serverStore)
+
+        func spawnSleep() -> (Process, ProcessEntry) {
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            child.arguments = ["600"]
+            try? child.run()
+            let pid = child.processIdentifier
+            let entry = ProcessEntry(
+                id: "pid:\(pid)", name: "sleep", pid: pid, path: "/bin/sleep",
+                startTime: ProcessControl.startTime(of: pid) ?? 0, cpu: 0, memory: 0, count: 1)
+            return (child, entry)
+        }
+
+        // End to end through the real watching side.
+        let monitor = RemoteMonitor(store: clientStore)
+        let info = DeviceInfo(id: serverStore.data.deviceID, name: "Test server", product: "Mac", chip: "")
+        let host = RemoteHost(
+            PairedHost(info: info, token: token, manualHost: "127.0.0.1", port: server.boundPort?.rawValue), monitor: monitor)
+        host.connect()
+        waitUntil { host.isConnected }
+        check(host.supportsProcesses && host.supportsQuit, "the other Mac announces process lists and quit")
+
+        let source = RemoteProcessSource(host: host, metric: .ram)
+        source.start()
+        waitUntil { !source.isMeasuring }
+        check(!source.top.isEmpty && source.top.allSatisfy { $0.startTime != 0 },
+              "a signed process list arrives, with start times")
+        check(source.quitUnavailableReason != nil, "quitting is off until the other Mac allows it")
+
+        server.setAllowsQuit(true, for: viewerID)
+        waitUntil { source.allowsQuit }
+        let (first, firstEntry) = spawnSleep()
+        source.quit(firstEntry, force: true)
+        waitUntil { !first.isRunning }
+        check(!first.isRunning && source.quitMessage == nil, "an allowed Mac force-quits a process remotely")
+        source.stop()
+        host.stop()
+
+        // The sharing side's checks, from a bare client holding the same token.
+        let client = RawClient(loopback(server.boundPort))
+        waitUntil { client.first(.hello) != nil }
+        let challenge = client.first(.hello)?.challenge ?? Data()
+        client.send(Message(type: .auth, id: viewerID, proof: PairingCrypto.authProof(token: token, challenge: challenge)))
+        waitUntil { client.first(.welcome) != nil }
+
+        func quit(_ entry: ProcessEntry, counter: UInt64, startTime: UInt64? = nil, proof: Data? = nil) -> QuitOutcome? {
+            let startTime = startTime ?? entry.startTime
+            let before = client.received.count
+            client.send(Message(
+                type: .quit,
+                proof: proof ?? RequestSigning.quitProof(
+                    token: token, challenge: challenge, counter: counter, pid: entry.pid, startTime: startTime, force: true),
+                counter: counter, pid: entry.pid, startTime: startTime, force: true))
+            // Only a reply to this send counts; an earlier one may share the counter (the replay check).
+            func reply() -> Message? { client.received[before...].first { $0.type == .quitResult && $0.counter == counter } }
+            waitUntil(timeout: 1.5) { reply() != nil }
+            return reply()?.outcome
+        }
+
+        let (second, secondEntry) = spawnSleep()
+        server.setAllowsQuit(false, for: viewerID)
+        check(quit(secondEntry, counter: 10) == .notAllowed && second.isRunning, "a Mac that isn't allowed can't quit anything")
+        server.setAllowsQuit(true, for: viewerID)
+        check(quit(secondEntry, counter: 11, proof: PairingCrypto.randomBytes()) == nil && second.isRunning,
+              "a forged quit request is ignored")
+        check(quit(secondEntry, counter: 12, startTime: secondEntry.startTime + 1) == .gone && second.isRunning,
+              "a quit for a reused pid is refused")
+        let launchd = ProcessEntry(id: "pid:1", name: "launchd", pid: 1, path: nil, cpu: 0, memory: 0, count: 1)
+        check(quit(launchd, counter: 13) == .protected, "launchd can't be quit remotely")
+        check(quit(secondEntry, counter: 14) == .done, "a signed quit works")
+        waitUntil { !second.isRunning }
+        check(!second.isRunning, "the process is gone")
+
+        let (third, thirdEntry) = spawnSleep()
+        check(quit(thirdEntry, counter: 14) == nil && third.isRunning, "a replayed counter is ignored")
+
+        client.send(Message(type: .processes, counter: 20, metric: "ram", grouped: true))
+        waitUntil { client.received.contains { $0.type == .processes && $0.counter == 20 } }
+        if let reply = client.received.first(where: { $0.type == .processes && $0.counter == 20 }),
+           let payload = reply.payload, let proof = reply.proof {
+            check(RequestSigning.isValidProcesses(proof, token: token, challenge: challenge, counter: 20, payload: payload),
+                  "process lists are signed")
+            var tampered = payload
+            tampered[tampered.startIndex] ^= 1
+            check(!RequestSigning.isValidProcesses(proof, token: token, challenge: challenge, counter: 20, payload: tampered),
+                  "an altered process list fails verification")
+        } else {
+            check(false, "process lists are signed")
+        }
+
+        for child in [first, second, third] where child.isRunning { child.terminate() }
+        client.close()
+        server.isEnabled = false
+    }
+
     defaults.removePersistentDomain(forName: suite)
     print(failures == 0 ? "All pairing checks passed." : "\(failures) pairing check(s) failed.")
     exit(failures == 0 ? 0 : 1)

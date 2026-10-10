@@ -6,6 +6,8 @@ struct PairedViewer: Codable, Identifiable {
     var name: String
     var token: Data
     var pairedAt: Date
+    /// Whether this viewer may quit processes here. Optional so pairings saved before it decode; nil means no.
+    var allowsQuit: Bool?
 }
 
 /// A Mac this one watches.
@@ -14,6 +16,8 @@ struct PairedHost: Codable {
     var token: Data
     /// Tailscale name or IP typed in when pairing, if any.
     var manualHost: String?
+    /// Port for `manualHost`, when not the default (the self-test uses a loopback port).
+    var port: UInt16?
 }
 
 struct PairingData: Codable {

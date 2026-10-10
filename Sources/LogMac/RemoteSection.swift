@@ -4,6 +4,8 @@ import SwiftUI
 struct RemoteSection: View {
     let model: StatsModel
     let monitor: RemoteMonitor
+    /// Opens a paired Mac's process list for CPU or RAM.
+    var onOpenProcesses: (RemoteHost, Metric) -> Void
     @State private var isAdding = false
 
     var body: some View {
@@ -31,7 +33,9 @@ struct RemoteSection: View {
             if !monitor.hosts.isEmpty {
                 Card {
                     ForEach(monitor.hosts) { host in
-                        RemoteHostRow(model: model, monitor: monitor, host: host)
+                        RemoteHostRow(model: model, monitor: monitor, host: host) { metric in
+                            onOpenProcesses(host, metric)
+                        }
                         if host.id != monitor.hosts.last?.id { Divider() }
                     }
                 }
@@ -44,6 +48,7 @@ private struct RemoteHostRow: View {
     let model: StatsModel
     let monitor: RemoteMonitor
     let host: RemoteHost
+    var onOpenProcesses: (Metric) -> Void
     @State private var isExpanded = false
 
     var body: some View {
@@ -117,21 +122,13 @@ private struct RemoteHostRow: View {
     }
 
     private func bar(_ metric: Metric) -> some View {
-        let value = host.value(metric)
-        let threshold = model.threshold(for: metric)
-        return HStack(spacing: 6) {
-            Text(metric.label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 26, alignment: .leading)
-            ThresholdBar(
-                fraction: (value ?? 0) / 100,
-                threshold: threshold / 100,
-                color: Level.of(value: value, threshold: threshold, alerting: host.alerts.alerting.contains(metric)).barColor
-            )
-            Text(value.map { "\(Int($0.rounded()))%" } ?? "--")
-                .monospacedDigit()
-                .frame(width: 34, alignment: .trailing)
+        let opensList = metric.hasProcessList && host.supportsProcesses
+        return RemoteBar(model: model, host: host, metric: metric, opensList: opensList) {
+            if opensList {
+                onOpenProcesses(metric)
+            } else {
+                withAnimation(.snappy) { isExpanded.toggle() }
+            }
         }
     }
 
@@ -160,6 +157,49 @@ private struct RemoteHostRow: View {
             formatter.unitsStyle = .full
             return "Offline · last seen \(formatter.localizedString(for: lastSeen, relativeTo: now))"
         }
+    }
+}
+
+/// A metric bar on a remote card. CPU and RAM open that Mac's process list when it supports one;
+/// other bars pass the tap on (to expand the card).
+private struct RemoteBar: View {
+    let model: StatsModel
+    let host: RemoteHost
+    let metric: Metric
+    let opensList: Bool
+    var onTap: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        let value = host.value(metric)
+        let threshold = model.threshold(for: metric)
+        HStack(spacing: 6) {
+            Text(metric.label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, alignment: .leading)
+            ThresholdBar(
+                fraction: (value ?? 0) / 100,
+                threshold: threshold / 100,
+                color: Level.of(value: value, threshold: threshold, alerting: host.alerts.alerting.contains(metric)).barColor
+            )
+            Text(value.map { "\(Int($0.rounded()))%" } ?? "--")
+                .monospacedDigit()
+                .frame(width: 34, alignment: .trailing)
+            // Hidden rather than omitted so every bar's value stays aligned.
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .opacity(opensList ? 1 : 0)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(Color.primary.opacity(isHovered && opensList ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 5))
+        .padding(.horizontal, -4)
+        .padding(.vertical, -2)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .onTapGesture(perform: onTap)
     }
 }
 
@@ -394,15 +434,24 @@ struct SharingSettings: View {
                 }
 
                 ForEach(server.viewers) { viewer in
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(server.connectedViewerIDs.contains(viewer.id) ? Color.green : Color.gray)
-                            .frame(width: 6, height: 6)
-                        Text(viewer.name)
-                        Spacer()
-                        Button("Remove") { server.removeViewer(viewer.id) }
-                            .buttonStyle(.borderless)
-                            .font(.system(size: 11))
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(server.connectedViewerIDs.contains(viewer.id) ? Color.green : Color.gray)
+                                .frame(width: 6, height: 6)
+                            Text(viewer.name)
+                            Spacer()
+                            Button("Remove") { server.removeViewer(viewer.id) }
+                                .buttonStyle(.borderless)
+                                .font(.system(size: 11))
+                        }
+                        Toggle("Can quit apps", isOn: Binding(
+                            get: { viewer.allowsQuit == true },
+                            set: { server.setAllowsQuit($0, for: viewer.id) }
+                        ))
+                        .font(.system(size: 11))
+                        .padding(.leading, 12)
+                        .help("Let \(viewer.name) quit apps and processes on this Mac from its process list")
                     }
                 }
             }

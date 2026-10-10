@@ -1,11 +1,13 @@
 import AppKit
 import SwiftUI
 
-/// The top processes by CPU or memory, shown when a metric row is clicked.
+/// The top processes by CPU or memory, shown when a metric row is clicked, for this Mac or a paired one.
 struct ProcessListView: View {
-    let model: StatsModel
-    @Bindable var processes: ProcessMonitor
+    let source: any ProcessSource
     let metric: Metric
+    /// e.g. "13% overall · 10 cores", or "Mac mini (M4) · 8.8 of 16 GB used".
+    let summary: String
+    let footnote: String
     var onBack: () -> Void
 
     var body: some View {
@@ -30,8 +32,9 @@ struct ProcessListView: View {
                 Text(summary)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
-                Toggle("Group", isOn: $processes.grouped)
+                Toggle("Group", isOn: Binding(get: { source.grouped }, set: { source.grouped = $0 }))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .font(.system(size: 11))
@@ -39,7 +42,13 @@ struct ProcessListView: View {
             }
 
             Card {
-                if isMeasuring {
+                if let status = source.statusMessage {
+                    Text(status)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                } else if source.isMeasuring {
                     HStack {
                         Spacer()
                         ProgressView().controlSize(.small)
@@ -47,46 +56,37 @@ struct ProcessListView: View {
                     }
                     .padding(.vertical, 20)
                 } else {
-                    ForEach(processes.top) { entry in
-                        ProcessRow(entry: entry, metric: metric)
-                            .contextMenu {
-                                // `entry` is captured when the menu opens, so re-sorting can't retarget it.
-                                if ProcessActions.isProtected(entry) {
-                                    Text("\(entry.name) can't be quit from here")
-                                } else {
-                                    Button("Quit \(entry.name)") {
-                                        ProcessActions.quit(entry)
-                                        processes.refreshSoon()
-                                    }
-                                    Button("Force Quit \(entry.name)", role: .destructive) {
-                                        ProcessActions.forceQuit(entry)
-                                        processes.refreshSoon()
-                                    }
-                                }
-                            }
+                    ForEach(source.top) { entry in
+                        ProcessRow(entry: entry, metric: metric, isRemote: source.isRemote)
+                            .contextMenu { menu(for: entry) }
                     }
                 }
             }
 
-            Text("Right-click a process to quit it. Shows processes running as you; system processes need admin access.")
+            if let message = source.quitMessage {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text(footnote)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var isMeasuring: Bool {
-        processes.entries.isEmpty || (metric == .cpu && !processes.hasCPU)
-    }
-
-    private var summary: String {
-        let s = model.snapshot
-        switch metric {
-        case .cpu:
-            let cores = ProcessInfo.processInfo.activeProcessorCount
-            return "\(Int((s.values[.cpu] ?? 0).rounded()))% overall · \(cores) cores"
-        default:
-            return "\(usage(Int64(s.memUsed), of: Int64(s.memTotal), .memory)) used"
+    // `entry` is captured when the menu opens, so re-sorting can't retarget it.
+    @ViewBuilder
+    private func menu(for entry: ProcessEntry) -> some View {
+        if ProcessControl.isProtected(name: entry.name, path: entry.path) {
+            Text("\(entry.name) can't be quit from here")
+        } else if let reason = source.quitUnavailableReason {
+            Text(reason)
+        } else {
+            Button("Quit \(entry.name)") { source.quit(entry, force: false) }
+            Button("Force Quit \(entry.name)", role: .destructive) { source.quit(entry, force: true) }
         }
     }
 }
@@ -94,10 +94,11 @@ struct ProcessListView: View {
 private struct ProcessRow: View {
     let entry: ProcessEntry
     let metric: Metric
+    let isRemote: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(nsImage: ProcessIcons.icon(for: entry))
+            Image(nsImage: ProcessIcons.icon(for: entry, isRemote: isRemote))
                 .resizable()
                 .frame(width: 16, height: 16)
             Text(entry.name)
@@ -127,49 +128,34 @@ private struct ProcessRow: View {
     }
 }
 
-/// Quit and Force Quit for a process row. Apps get a normal quit request (so they can prompt to save);
-/// other processes get SIGTERM / SIGKILL. Only the user's own processes are listed, so no privileges are needed.
-@MainActor
-private enum ProcessActions {
-    /// Killing these ends the login session.
-    private static let protectedNames: Set<String> = ["loginwindow", "launchd"]
-
-    static func isProtected(_ entry: ProcessEntry) -> Bool {
-        let executable = entry.path.map { ($0 as NSString).lastPathComponent }
-        return protectedNames.contains(entry.name) || executable.map(protectedNames.contains) == true
-    }
-
-    static func quit(_ entry: ProcessEntry) {
-        guard !isProtected(entry) else { return }
-        if let app = NSRunningApplication(processIdentifier: entry.pid) {
-            app.terminate()
-        } else {
-            kill(entry.pid, SIGTERM)
-        }
-    }
-
-    static func forceQuit(_ entry: ProcessEntry) {
-        guard !isProtected(entry) else { return }
-        if let app = NSRunningApplication(processIdentifier: entry.pid) {
-            app.forceTerminate()
-        } else {
-            kill(entry.pid, SIGKILL)
-        }
-    }
-}
-
-/// App icons for GUI processes, the generic executable icon otherwise. Cached by pid.
+/// App icons for GUI processes, the generic executable icon otherwise.
+/// A remote row's pid means nothing here, so its icon comes from this Mac's copy of the app, if any.
 @MainActor
 private enum ProcessIcons {
-    private static var cache: [pid_t: NSImage] = [:]
+    private static var cache: [String: NSImage] = [:]
 
-    static func icon(for entry: ProcessEntry) -> NSImage {
-        if let cached = cache[entry.pid] { return cached }
-        let icon = NSRunningApplication(processIdentifier: entry.pid)?.icon
+    static func icon(for entry: ProcessEntry, isRemote: Bool) -> NSImage {
+        let key = isRemote ? "remote:\(entry.bundleID ?? entry.path ?? entry.name)" : "local:\(entry.pid)"
+        if let cached = cache[key] { return cached }
+        let icon = isRemote ? remoteIcon(for: entry) : localIcon(for: entry)
+        if cache.count > 500 { cache.removeAll() }
+        cache[key] = icon
+        return icon
+    }
+
+    private static func localIcon(for entry: ProcessEntry) -> NSImage {
+        NSRunningApplication(processIdentifier: entry.pid)?.icon
             ?? entry.path.map { NSWorkspace.shared.icon(forFile: $0) }
             ?? NSWorkspace.shared.icon(for: .unixExecutable)
-        if cache.count > 500 { cache.removeAll() }
-        cache[entry.pid] = icon
-        return icon
+    }
+
+    private static func remoteIcon(for entry: ProcessEntry) -> NSImage {
+        if let bundleID = entry.bundleID, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return NSWorkspace.shared.icon(forFile: url.path)
+        }
+        if let path = entry.path, FileManager.default.fileExists(atPath: path) {
+            return NSWorkspace.shared.icon(forFile: path)
+        }
+        return NSWorkspace.shared.icon(for: .unixExecutable)
     }
 }

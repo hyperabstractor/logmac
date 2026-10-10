@@ -31,10 +31,19 @@ final class RemoteHost: Identifiable {
     private(set) var lastSeen: Date?
     private(set) var alerts = AlertTracker()
     private(set) var address: String?
+    /// What the other Mac answers beyond stats (`RemoteProtocol.features`); empty for older builds.
+    private(set) var features: Set<String> = []
+
+    /// The open process list for this Mac, if any; receives verified replies.
+    @ObservationIgnored weak var processSource: RemoteProcessSource?
 
     @ObservationIgnored weak var monitor: RemoteMonitor?
     @ObservationIgnored private let token: Data
     @ObservationIgnored let manualHost: String?
+    @ObservationIgnored private let port: NWEndpoint.Port
+    /// This connection's challenge, which signed requests and replies are bound to.
+    @ObservationIgnored private var challenge = Data()
+    @ObservationIgnored private var counter: UInt64 = 0
     @ObservationIgnored private var connection: LineConnection?
     @ObservationIgnored private var retry: DispatchWorkItem?
     @ObservationIgnored private var watchdog: Timer?
@@ -46,11 +55,45 @@ final class RemoteHost: Identifiable {
         info = paired.info
         token = paired.token
         manualHost = paired.manualHost
+        port = paired.port.flatMap(NWEndpoint.Port.init(rawValue:)) ?? RemoteProtocol.port
         self.monitor = monitor
     }
 
     var paired: PairedHost {
-        PairedHost(info: info, token: token, manualHost: manualHost)
+        PairedHost(info: info, token: token, manualHost: manualHost, port: port == RemoteProtocol.port ? nil : port.rawValue)
+    }
+
+    var supportsProcesses: Bool {
+        isConnected && features.contains("processes")
+    }
+
+    var supportsQuit: Bool {
+        isConnected && features.contains("quit")
+    }
+
+    /// Asks for the top processes; returns the request's counter, or nil when not connected.
+    func requestProcesses(metric: Metric, grouped: Bool) -> UInt64? {
+        guard supportsProcesses, let connection else { return nil }
+        counter += 1
+        connection.send(Message(type: .processes, counter: counter, metric: metric.rawValue, grouped: grouped))
+        return counter
+    }
+
+    /// Sends a signed Quit or Force Quit; returns the request's counter, or nil when not connected.
+    func requestQuit(_ entry: ProcessEntry, force: Bool) -> UInt64? {
+        guard supportsQuit, let connection else { return nil }
+        counter += 1
+        connection.send(Message(
+            type: .quit,
+            proof: RequestSigning.quitProof(
+                token: token, challenge: challenge, counter: counter,
+                pid: entry.pid, startTime: entry.startTime, force: force),
+            counter: counter,
+            pid: entry.pid,
+            startTime: entry.startTime,
+            force: force
+        ))
+        return counter
     }
 
     var isConnected: Bool {
@@ -99,7 +142,7 @@ final class RemoteHost: Identifiable {
         var hosts: [String] = []
         if let ip = info.tailscaleIP { hosts.append(ip) }
         if let manualHost, !hosts.contains(manualHost) { hosts.append(manualHost) }
-        endpoints += hosts.map { .hostPort(host: NWEndpoint.Host($0), port: RemoteProtocol.port) }
+        endpoints += hosts.map { .hostPort(host: NWEndpoint.Host($0), port: port) }
         return endpoints
     }
 
@@ -125,6 +168,8 @@ final class RemoteHost: Identifiable {
                 // A different Mac answering at this address (e.g. a reused IP) isn't ours to talk to.
                 guard message.id == self.id, let challenge = message.challenge, let deviceID = self.monitor?.deviceID
                 else { return connection.close() }
+                // The counter keeps rising across connections, so an open process list never sees it go back.
+                self.challenge = challenge
                 connection.send(Message(
                     type: .auth, id: deviceID, proof: PairingCrypto.authProof(token: self.token, challenge: challenge)))
 
@@ -140,6 +185,7 @@ final class RemoteHost: Identifiable {
                     self.info = info
                     self.monitor?.persist(self)
                 }
+                self.features = Set(message.features ?? [])
                 self.startWatchdog()
 
             case .stats:
@@ -149,6 +195,22 @@ final class RemoteHost: Identifiable {
                 if let monitor = self.monitor {
                     self.alerts.update(values: stats.metricValues, threshold: monitor.threshold, now: Date())
                 }
+
+            case .processes:
+                // Only a list signed with our token for this connection; anything else may have been altered.
+                guard authenticated, let counter = message.counter, let payload = message.payload,
+                      let proof = message.proof,
+                      RequestSigning.isValidProcesses(
+                          proof, token: self.token, challenge: self.challenge, counter: counter, payload: payload),
+                      let entries = try? JSONDecoder().decode([ProcessEntry].self, from: payload)
+                else { return }
+                self.processSource?.receive(
+                    counter: counter, entries: entries,
+                    hasCPU: message.hasCPU ?? false, allowsQuit: message.allowsQuit ?? false)
+
+            case .quitResult:
+                guard authenticated, let counter = message.counter else { return }
+                self.processSource?.receiveQuitResult(counter: counter, outcome: message.outcome ?? .failed)
 
             case .error where message.reason == RejectReason.unauthorized:
                 self.state = .unpaired

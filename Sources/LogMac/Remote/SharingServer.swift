@@ -57,6 +57,9 @@ final class SharingServer {
     @ObservationIgnored private var pairingExpires = Date.distantPast
     @ObservationIgnored private var failedSessions = 0
     @ObservationIgnored private var pendingSession: Session?
+    @ObservationIgnored private let processSampler = ProcessSampler()
+    @ObservationIgnored private let processQueue = DispatchQueue(label: "logmac.sharing.processes", qos: .utility)
+    @ObservationIgnored private var lastProcessSample = Date.distantPast
 
     private final class Session {
         let connection: LineConnection
@@ -66,6 +69,9 @@ final class SharingServer {
         let nonce = PairingCrypto.randomBytes()
         var viewerID: String?
         var pairing: Pairing?
+        /// Highest counter of an accepted quit request; anything not above it is a replay.
+        var lastQuitCounter: UInt64 = 0
+        var lastProcessesRequest = Date.distantPast
 
         struct Pairing {
             let peerID: String
@@ -132,6 +138,14 @@ final class SharingServer {
     func cancelPendingPairing() {
         guard let session = pendingSession else { return }
         endPairing(session, notify: RejectReason.cancelled, countsAsFailure: true)
+    }
+
+    /// Lets a paired Mac quit processes on this one (off by default).
+    func setAllowsQuit(_ allowed: Bool, for viewerID: String) {
+        store.update { data in
+            if let index = data.viewers.firstIndex(where: { $0.id == viewerID }) { data.viewers[index].allowsQuit = allowed }
+        }
+        viewers = store.data.viewers
     }
 
     func removeViewer(_ id: String) {
@@ -257,8 +271,9 @@ final class SharingServer {
     }
 
     private func handle(_ message: Message, from session: Session) {
-        // Authenticated viewers only receive; anything they send is ignored.
-        guard session.viewerID == nil else { return }
+        if let viewerID = session.viewerID {
+            return handleRequest(message, from: session, viewerID: viewerID)
+        }
 
         switch message.type {
         case .auth where session.pairing == nil:
@@ -354,9 +369,77 @@ final class SharingServer {
 
     private func authenticate(_ session: Session, viewerID: String) {
         session.viewerID = viewerID
-        session.connection.send(Message(type: .welcome, info: DeviceInfo.current(id: store.data.deviceID)))
+        session.connection.send(Message(
+            type: .welcome, info: DeviceInfo.current(id: store.data.deviceID),
+            features: RemoteProtocol.features.sorted()))
         session.connection.send(Message(type: .stats, stats: RemoteStats(snapshot())))
         refreshConnected()
+    }
+
+    // MARK: Requests from paired viewers
+
+    private func handleRequest(_ message: Message, from session: Session, viewerID: String) {
+        guard let viewer = store.data.viewers.first(where: { $0.id == viewerID }) else { return session.connection.close() }
+        switch message.type {
+        case .processes:
+            // At most a couple of samples a second per viewer; each one walks every process.
+            guard let counter = message.counter, Date().timeIntervalSince(session.lastProcessesRequest) > 0.4 else { return }
+            session.lastProcessesRequest = Date()
+            sendProcesses(
+                to: session, viewer: viewer, counter: counter,
+                metric: message.metric.flatMap(Metric.init(rawValue:)) ?? .cpu, grouped: message.grouped ?? true)
+        case .quit:
+            handleQuit(message, from: session, viewer: viewer)
+        default:
+            break
+        }
+    }
+
+    private func sendProcesses(to session: Session, viewer: PairedViewer, counter: UInt64, metric: Metric, grouped: Bool) {
+        let apps = AppRecord.running()
+        let limit = ProcessMonitor.limit
+        let key = ObjectIdentifier(session)
+        // An old baseline would average CPU over minutes; start fresh and let the next request measure.
+        let stale = Date().timeIntervalSince(lastProcessSample) > 5
+        lastProcessSample = Date()
+        processQueue.async { [processSampler] in
+            if stale { processSampler.reset() }
+            let result = processSampler.sample(apps: apps, grouped: grouped)
+            let top = ProcessEntry.top(result.entries, by: metric, limit: limit)
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, let session = self.sessions[key], session.viewerID == viewer.id,
+                          let payload = try? JSONEncoder().encode(top)
+                    else { return }
+                    session.connection.send(Message(
+                        type: .processes,
+                        proof: RequestSigning.processesProof(
+                            token: viewer.token, challenge: session.challenge, counter: counter, payload: payload),
+                        counter: counter,
+                        payload: payload,
+                        hasCPU: result.hasCPU,
+                        allowsQuit: self.store.data.viewers.first { $0.id == viewer.id }?.allowsQuit == true
+                    ))
+                }
+            }
+        }
+    }
+
+    private func handleQuit(_ message: Message, from session: Session, viewer: PairedViewer) {
+        // Unsigned, forged, or replayed requests are dropped without a reply.
+        guard let counter = message.counter, let pid = message.pid, let startTime = message.startTime,
+              let force = message.force, let proof = message.proof,
+              RequestSigning.isValidQuit(
+                  proof, token: viewer.token, challenge: session.challenge,
+                  counter: counter, pid: pid, startTime: startTime, force: force),
+              counter > session.lastQuitCounter
+        else { return }
+        session.lastQuitCounter = counter
+
+        let outcome = viewer.allowsQuit == true
+            ? ProcessControl.quit(pid: pid, startTime: startTime, force: force)
+            : .notAllowed
+        session.connection.send(Message(type: .quitResult, counter: counter, outcome: outcome))
     }
 
     private func reject(_ session: Session, _ reason: String) {
